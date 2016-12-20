@@ -1,3 +1,4 @@
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include <stdio.h>
 #include <unistd.h>
 
@@ -13,6 +14,9 @@
 
 #include <iostream>
 #include <fstream>
+#include <time.h>
+
+//#include <mutex>
 
 #define __STDC_CONSTANT_MACROS
 
@@ -43,46 +47,55 @@ int head = 0;
 int end = 0;
 unsigned char testData[200000] = {0};
 
-bool INeedPushData = true;
+bool INeedExit = false;
+bool INeedPause = false;
 const char *in_fileName;
+//std::mutex mtx;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 void *bufferThread(void *nothing);
-
+void *readStdinThread(void *nothing);
+void pauseOrStart(void);
 int read_packet(void *bufferFifo, unsigned char *bufferOut, int buf_size);
 
-void exitHandler(int p){
-    INeedPushData = false;
+void exitHandler(int p) {
+    INeedExit = true;
     printf("\nreceive SIGTERM\n\n");
 }
+
+#define BLOCKWHENPAUSE 1
 
 int main(int argc, char* argv[]) {
     signal(SIGTERM, exitHandler);
     signal(SIGINT, exitHandler);
-    
-    ofstream ofs;
-    ofs.open("log.log", ios::out|ios::app|ios::trunc);
-    
-    int OutPutFd = open("ffmTest.output", O_RDWR|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR);
-    if (-1 == OutPutFd){
-        ofs << "open ffmTest.output fail"<<endl;\
+/*
+        ofstream ofs;
+        ofs.open("log.log", ios::out|ios::app|ios::trunc);
+        
+        int OutPutFd = open("ffmTest.output", O_RDWR|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR);
+        if (-1 == OutPutFd){
+            ofs << "open ffmTest.output fail"<<endl;\
         ofs.close();
-        return 0;
-    }
-    if (-1 == dup2(OutPutFd, STDOUT_FILENO)){
-        ofs << "dup2 fail"<<endl;
-        ofs.close();
-        close(OutPutFd);
-        return 0;
-    }
+            return 0;
+        }
+        if (-1 == dup2(OutPutFd, STDOUT_FILENO)){
+            ofs << "dup2 fail"<<endl;
+            ofs.close();
+            close(OutPutFd);
+            return 0;
+        }
+ */ 
     time_t rawTime;
     //struct tm *timeInfo;
     time(&rawTime);
     printf("%sffmTest started.\n\n", ctime(&rawTime));
-    
+
     pthread_t thread;
+    pthread_t thread2;
     char* out_filename = argv[1];
     //char* out_filename = "rtsp://120.27.188.84:8888/realtime/$1234/1/realtime.sdp";
-    if (argc != 2){
+    if (argc != 2) {
         printf("usage: ./ffmTest rtsp://...sdp");
         return 0;
     }
@@ -94,21 +107,22 @@ int main(int argc, char* argv[]) {
     AVFormatContext *ifmt_ctx = NULL;
     AVFormatContext *ofmt_ctx = NULL;
     AVPacket pkt;
-    const char *in_filename1, *in_filename2;
-    int ret, i;
+    //const char *in_filename1;
+    int ret;
+    unsigned int i;
     int videoindex = -1;
     int frame_index = 0;
     int64_t start_time = 0;
 
     // run path is /mnt/hgfs/ShareFolder/ffmTest/out/JavaSub/
-    in_fileName = "../video.h264";
+    in_fileName = "/mnt/hgfs/ShareFolder/ffmTest/out/JavaSub/video.h264";
 
     pthread_create(&thread, NULL, bufferThread, NULL);
+    pthread_create(&thread2, NULL, readStdinThread, NULL);
 
     usleep(100000);
     unsigned char * iobuffer = (unsigned char *) av_malloc(327680);
-    in_filename1 = "/home/public/sun_jianfeng/ffmTest/out/video.mp4";
-    in_filename2 = "/home/public/sun_jianfeng/ffmTest/out/test.mp4";
+    //in_filename1 = "/home/public/sun_jianfeng/ffmTest/out/video.mp4";
 
     av_register_all();
     //Network
@@ -121,7 +135,7 @@ int main(int argc, char* argv[]) {
     //ifmt_ctx->max_analyze_duration = 5 * AV_TIME_BASE;
 
     //输入（Input）
-    if ((ret = avformat_open_input(&ifmt_ctx, in_filename1, 0, 0)) < 0) {
+    if ((ret = avformat_open_input(&ifmt_ctx, in_fileName, 0, 0)) < 0) {
         printf("Could not open input file.");
         goto end;
     }
@@ -138,14 +152,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-
-    //av_dump_format(ifmt_ctx, 0, 0, 0);
-
     //输出（Output）
 
-    //avformat_alloc_output_context2(&ofmt_ctx, NULL, "flv", out_filename); //RTMP
     avformat_alloc_output_context2(&ofmt_ctx, NULL, "rtsp", out_filename); //RTsP
-    //avformat_alloc_output_context2(&ofmt_ctx, NULL, "mpegts", out_filename);//UDP
 
     if (!ofmt_ctx) {
         printf("Could not create output context\n");
@@ -196,9 +205,16 @@ int main(int argc, char* argv[]) {
 
     start_time = av_gettime();
 
-    while (INeedPushData) {
-
-        int times, times1;
+    while (!INeedExit) {
+#if BLOCKWHENPAUSE
+        pauseOrStart();
+#else        
+        if (INeedPause){
+            sleep(5);
+            //continue;
+        }
+#endif        
+        int times;
 
         AVStream *in_stream, *out_stream;
         ret = av_read_frame(ifmt_ctx, &pkt);
@@ -246,9 +262,6 @@ int main(int argc, char* argv[]) {
             frame_index++;
         }
         times = av_gettime();
-        //ret = av_write_frame(ofmt_ctx, &pkt);
-        times1 = av_gettime();
-        //printf("write fram times:%dus\n", times1 - times);
         ret = av_interleaved_write_frame(ofmt_ctx, &pkt);
         if (ret < 0) {
             printf("Error muxing packet\n");
@@ -270,11 +283,9 @@ end:
         printf("Error occurred.\n");
         return -1;
     }
-    
+
     printf("ffmTest done.\n\n");
-    ofs.close();
-    close(OutPutFd);
-    
+
     return 0;
 }
 
@@ -283,7 +294,7 @@ void *bufferThread(void *nothing) {
     int fileFd2 = 0;
 
     static int times = 0;
-    static int flag = 0;
+//    static int flag = 0;
     fileFd1 = open(in_fileName, O_RDONLY);
 
     if (fileFd1 == -1 || fileFd2 == -1) {
@@ -292,37 +303,47 @@ void *bufferThread(void *nothing) {
     }
 
     printf("begin to read data !!!\n");
-    while (INeedPushData) {
-
+    while (!INeedExit) {
+        // pauseOrStart();
+        
         if (buffLen == 0) {
             if (times >= 10000) {
-                //flag = flag == 0 ? 0:0;
                 times = 0;
-
             }
-            if (flag == 0) {
-                if ((buffLen = read(fileFd1, bufferFifo, 327680)) == 0) {
-                    printf("file end!\n");
-                    close(fileFd1);
-                    //fileFd1 = open("/data/data/xiao/test.h264",O_RDONLY);
-                    fileFd1 = open(in_fileName, O_RDONLY);
-                    //fileFd1 = open("./frame.h264",O_RDONLY);
-                }
-                //printf("read data1! buffLen:%d\n",buffLen);
-            } else if (flag == 1) {
-
-                if ((buffLen = read(fileFd1, bufferFifo, 327680)) == 0) {
-                    printf("file end!\n");
-                    close(fileFd1);
-                    fileFd2 = open("/data/data/xiao/test.h264", O_RDONLY);
-                }
-                printf("read data2! buffLen:%d\n", buffLen);
-
+            if ((buffLen = read(fileFd1, bufferFifo, 327680)) == 0) {
+                printf("file end!\n");
+                close(fileFd1);
+                fileFd1 = open(in_fileName, O_RDONLY);
             }
+            //printf("read data1! buffLen:%d\n",buffLen);
             times++;
         }
-
         usleep(100);
+    }
+    return NULL;
+}
+
+void *readStdinThread(void* nothing) {
+
+    //bool isPushing = true;
+    string cmd;
+    for (; !INeedExit;) {
+        cin >> cmd;
+        if (cmd[0] == 'p' && !INeedPause) {
+            //printf("read p.\n");
+            INeedPause = true;
+#if BLOCKWHENPAUSE
+            pthread_mutex_lock(&mutex);
+#endif            
+            printf("readStdinThread locked.\n");
+        } else if (cmd[0] == 'c' && INeedPause) {
+            //printf("read c.\n");
+            INeedPause = false;
+#if BLOCKWHENPAUSE
+            pthread_mutex_unlock(&mutex);
+#endif
+            printf("readStdinThread unlocked.\n");
+        }
     }
     return NULL;
 }
@@ -335,8 +356,8 @@ int read_packet(void *bufferFifo, unsigned char *bufferOut, int buf_size) {
     if (times % 60 == 30) {
 
     }
-    printf("the id of read_packet thread:%ld\n", syscall(SYS_gettid));
-    printf("buffLen end!:%d  times:%d\n", buffLen, times);
+    //printf("the id of read_packet thread:%ld\n", syscall(SYS_gettid));
+    //printf("buffLen end!:%d  times:%d\n", buffLen, times);
 
     times++;
 
@@ -356,10 +377,31 @@ int read_packet(void *bufferFifo, unsigned char *bufferOut, int buf_size) {
         usleep(10000);
         return buf_size;
     }
-
-
     return 0;
 }
 
+void pauseOrStart(void) {
+    if (INeedPause) {
+        // bolck here until readStdinThread read c and unlock
+        printf("\n");
+        time_t t = time(NULL);
+        struct tm* current_time = localtime(&t);
+        printf("ffmpeg pause. %d:%d:%d\n",
+                current_time->tm_hour,
+                current_time->tm_min,
+                current_time->tm_sec);
+        //mtx.lock();
+        pthread_mutex_lock(&mutex);
 
+        //mtx.unlock();
+        pthread_mutex_unlock(&mutex);
+        //t = time(NULL);
+        t = time(NULL);
+        current_time = localtime(&t);
+        printf("ffmpeg start. %d:%d:%d\n",
+                current_time->tm_hour,
+                current_time->tm_min,
+                current_time->tm_sec);
+    }
+}
 
